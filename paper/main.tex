@@ -5,6 +5,7 @@
 \usepackage{microtype}
 \usepackage{siunitx}
 \usepackage{tabularx}
+\usepackage{graphicx}
 \usepackage{xcolor}
 \usepackage{hyperref}
 
@@ -145,6 +146,16 @@ remain authoritative.
     \bottomrule
   \end{tabularx}
 \end{table*}
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.98\textwidth]{figures/paired_workloads.png}
+  \caption{Paired end-to-end comparison across the completed workload matrix.
+  Bars show three-seed means and whiskers show sample standard deviation. The
+  periodic workload is the positive history-reuse case; the other workloads
+  expose drift, no-sharing overhead, and concurrent queue sharing.}
+  \label{fig:paired-workloads}
+\end{figure*}
 
 \section{Results}
 
@@ -425,6 +436,15 @@ prevent cross-run reuse, while retaining steady-state bounded-window overhead.
   \end{tabular}
 \end{table*}
 
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.98\textwidth]{figures/open_loop_performance.png}
+  \caption{Open-loop behavior as offered load increases. H-PEEK and the
+  minimum-evidence gate track PEEK's throughput, tail latency, class-level
+  fairness, and hot/cold service gap on this no-new-cache-opportunity trace.}
+  \label{fig:open-loop-performance}
+\end{figure*}
+
 The two policies have identical cache-hit and recompute-token counts at every
 load point. H-PEEK therefore provides no caching opportunity on this workload;
 the paired data isolate overhead. Its throughput change ranges from $+0.02\%$
@@ -519,6 +539,16 @@ costs 1.64 $\mu$s on average.
     \bottomrule
   \end{tabular}
 \end{table}
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.98\textwidth]{figures/cache_overhead.png}
+  \caption{Mechanism benefit and CPU-path cost. H-PEEK retains more periodic
+  cache-hit tokens and reduces return TTFT, while the default history policy
+  scans more candidates and spends more eviction time. The $m{=}2$ evidence
+  gate reduces the profiled overhead relative to default H-PEEK.}
+  \label{fig:cache-overhead}
+\end{figure*}
 
 \section{Interpretation and Threats to Validity}
 
