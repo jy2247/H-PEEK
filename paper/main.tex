@@ -1,0 +1,563 @@
+\documentclass[10pt,twocolumn]{article}
+
+\usepackage[margin=0.72in]{geometry}
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage{siunitx}
+\usepackage{tabularx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\sisetup{detect-all,round-mode=places,round-precision=3}
+\newcommand{\hpeek}{H-PEEK}
+\newcommand{\peek}{PEEK}
+\newcommand{\todoresult}{\textcolor{gray}{pending}}
+
+\title{H-PEEK: History-Enhanced Predictive KV Cache Management\\
+       \large Prototype Design and Preliminary Evaluation}
+\author{H-PEEK Project}
+\date{October 19, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+PEEK protects reusable KV-cache blocks using demand visible in the current
+waiting queue. This report evaluates a complementary cross-request signal: the
+frequency with which a prefix block appeared in a bounded window of previously
+admitted requests. We implement this signal in the PEEK Online integration for
+vLLM V1, without replacing PEEK's scheduler. On a deterministic periodic-reuse
+trace, H-PEEK preserves an absent 2,992-token prefix across cache pressure and
+reduces its return-request time-to-first-token (TTFT) from 272.5 to 50.9 ms.
+Across three seeds, throughput changes by +2.57\% on the positive trace,
+-0.10\% on a no-sharing trace, and -0.80\% on PEEK's concurrent queue-sharing
+case. Internal eviction time and scan volume increase substantially, motivating
+the overhead and adaptation ablations specified in this report. These are
+prototype results, not a reproduction of all PEEK paper results.
+\end{abstract}
+
+\section{Scope and Status}
+
+The current artifact validates the H-PEEK eviction mechanism on one NVIDIA RTX
+A5000 and Qwen2.5-3B-Instruct. It does not yet claim full reproduction of the
+PEEK paper or final 7B performance. All reported paired comparisons use the
+same PEEK cLPM scheduler; only the eviction policy changes.
+
+Implementation validation includes 195 passing upstream PEEK Python CPU tests,
+24 passing Rust tests, 59 passing online regression tests (six skipped), and
+nine H-PEEK-specific history/BlockPool tests. The required zero-waiting-demand
+case, exact window expiry, empty-history fallback, key deduplication, memory
+bound, and KV-cache-group identity are covered.
+
+\begin{table}[t]
+  \centering
+  \caption{Locked prototype environment.}
+  \label{tab:environment}
+  \begin{tabular}{ll}
+    \toprule
+    Component & Version or setting \\
+    \midrule
+    PEEK upstream & \texttt{3aca72b63c1d} \\
+    vLLM & 0.19.1, V1 engine \\
+    PyTorch & 2.10.0+cu128 \\
+    Model & Qwen2.5-3B-Instruct \\
+    GPU & 1$\times$ RTX A5000 24 GB \\
+    KV capacity & 4,096 blocks / 65,536 tokens \\
+    History window & 256 admitted requests \\
+    History weight $\alpha$ & 1.0 \\
+    Seeds & 42, 142, 242 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Method}
+
+\subsection{Admitted-request history}
+
+Each independent request contributes at most one observation when it first
+moves from \texttt{WAITING} to \texttt{RUNNING}. Preemption, resume, and
+re-entry into the waiting queue do not add observations. Prefix hashes are
+deduplicated within a request and stored in an exact FIFO request window. When
+the oldest request expires, its contribution is decremented. Consequently,
+retained references are bounded by
+$W\times K_{\max}$, where $W$ is the request-window size and $K_{\max}$ is the
+per-request key cap.
+
+For an evictable block $b$, the MVP protection score is
+\begin{equation}
+  S(b) = q_b + \alpha h_b,
+  \label{eq:score}
+\end{equation}
+where $q_b$ is current waiting-queue demand and $h_b$ is the number of admitted
+requests in the active window containing $b$. Higher scores are harder to
+evict. This request-frequency signal is distinct from PEEK's block access-time
+\texttt{recency} and \texttt{decay} modes.
+
+\subsection{Pipeline integration}
+
+The implementation makes two behaviorally critical changes. First, the
+eviction path falls back to stock LRU only when neither usable waiting demand
+nor usable historical demand exists. Second, a candidate with $q_b=0$ is still
+scored using $h_b$ rather than being selected immediately. Hash identity uses
+vLLM's \texttt{BlockHashWithGroupId} conversion so cache groups do not alias.
+The existing free queue, reference counts, cached-hash mapping, and scan cap
+remain authoritative.
+
+\begin{table*}[t]
+  \centering
+  \caption{Policy definitions used in the prototype.}
+  \label{tab:policies}
+  \begin{tabularx}{\textwidth}{lllX}
+    \toprule
+    Policy & Scheduler & Eviction signal & Purpose \\
+    \midrule
+    Vanilla & vLLM & LRU/APC & Engine baseline \\
+    PEEK cluster & PEEK cLPM & Current queue demand and prefix depth & Primary PEEK baseline \\
+    PEEK recency & PEEK-compatible & Queue demand and linear access age & Existing age baseline \\
+    PEEK decay & PEEK-compatible & Queue demand and exponential access age & Existing age baseline \\
+    H-PEEK history-only & vLLM/PEEK & $\alpha h_b$ & History ablation \\
+    H-PEEK joint & PEEK cLPM & $q_b+\alpha h_b$ & Proposed P1 policy \\
+    \bottomrule
+  \end{tabularx}
+\end{table*}
+
+\section{Experimental Design}
+
+\begin{table*}[t]
+  \centering
+  \caption{Completed and planned workloads. Cache state is cleared before each
+  measured workload.}
+  \label{tab:workloads}
+  \begin{tabularx}{\textwidth}{lllX}
+    \toprule
+    Workload & Arrival mode & Status & Property under test \\
+    \midrule
+    Periodic reuse & Sequential & Complete, 3 seeds & Prefix absent from waiting queue returns after pressure \\
+    Single-target drift & Sequential & Complete, 3 seeds & One newer target competes with old frequent prefixes \\
+    Singleton & 8-way concurrent & Complete, 3 seeds & No shared prefix; overhead-only negative control \\
+    Queue sharing & 16-way concurrent & Complete, 3 seeds & Preserve PEEK's current-queue strength and fairness proxy \\
+    Strong hotspot switch & Sequential & Complete, 3 seeds & Nineteen old frequency-4 prefixes versus nineteen new frequency-2 prefixes \\
+    80-request absence gap & Sequential & Complete, 3 seeds & Test request-window expiry and long-gap reuse \\
+    Capacity sweep & Sequential & Complete, 3 seeds & 2,048/4,096/8,192 KV blocks \\
+    Open-loop load/fairness & 4--16 req/s & Complete, 3 seeds & Saturation, tail latency, and hot/cold service equity \\
+    Window sweep & Mixed & \todoresult & 64/128/256/512 admitted requests \\
+    7B validation & Mixed & \todoresult & Primary performance model \\
+    \bottomrule
+  \end{tabularx}
+\end{table*}
+
+\section{Results}
+
+\subsection{Initial six-policy mechanism check}
+
+Before the paired three-seed matrix, we ran a single deterministic trace with
+an exactly 3,456-token hot prefix, 24 unique pressure prefixes, and one hot
+return. Table~\ref{tab:six-policy} establishes that PEEK's existing recency and
+decay modes do not explain the H-PEEK mechanism: all non-history policies miss
+the returning prefix, whereas both H-PEEK variants retain it. Because this was
+one run and startup order was not randomized, it is mechanism evidence rather
+than a performance estimate.
+
+\begin{table*}[t]
+  \centering
+  \caption{Initial one-run six-policy pressure check at 4,096 KV blocks.}
+  \label{tab:six-policy}
+  \begin{tabular}{lrrr}
+    \toprule
+    Policy & Return hit/query tokens & Return compute tokens & Return TTFT (s) \\
+    \midrule
+    Vanilla vLLM & 0 / 3,465 & 3,465 & 0.3140 \\
+    PEEK cluster & 0 / 3,465 & 3,465 & 0.3210 \\
+    PEEK recency & 0 / 3,465 & 3,465 & 0.3140 \\
+    PEEK decay & 0 / 3,465 & 3,465 & 0.3175 \\
+    H-PEEK history-only & 3,456 / 3,465 & 9 & 0.0518 \\
+    H-PEEK joint & 3,456 / 3,465 & 9 & 0.0526 \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+
+\subsection{Three-seed paired comparison}
+
+Table~\ref{tab:main-results} reports arithmetic mean and sample standard
+deviation across three deterministic prefix identities. Request throughput and
+TTFT include the full workload. The positive trace contains one return request
+per seed, reported separately in Table~\ref{tab:return}.
+
+\begin{table*}[t]
+  \centering
+  \caption{End-to-end results at 4,096 KV blocks. Values are mean $\pm$ sample
+  standard deviation over three seeds. Relative change is H-PEEK versus PEEK.}
+  \label{tab:main-results}
+  \begin{tabular}{llrrr}
+    \toprule
+    Workload & Metric & PEEK cluster & H-PEEK joint & Relative change \\
+    \midrule
+    Periodic reuse & Requests/s & $4.015\pm0.021$ & $4.118\pm0.014$ & $+2.57\%$ \\
+                   & TTFT P95 (s) & $0.278\pm0.003$ & $0.278\pm0.001$ & $-0.01\%$ \\
+                   & Prompt tokens/s & $12063.6\pm61.8$ & $12373.9\pm43.5$ & $+2.57\%$ \\
+    \addlinespace
+    Single-target drift & Requests/s & $8.999\pm0.055$ & $8.949\pm0.064$ & $-0.56\%$ \\
+                        & TTFT P95 (s) & $0.274\pm0.002$ & $0.274\pm0.001$ & $-0.15\%$ \\
+    \addlinespace
+    Singleton & Requests/s & $12.908\pm0.051$ & $12.895\pm0.028$ & $-0.10\%$ \\
+              & TTFT P95 (s) & $0.763\pm0.003$ & $0.764\pm0.001$ & $+0.06\%$ \\
+              & Local cache-hit tokens & 0 & 0 & no change \\
+    \addlinespace
+    Queue sharing & Requests/s & $65.704\pm1.523$ & $65.179\pm0.964$ & $-0.80\%$ \\
+                  & TTFT P95 (s) & $0.265\pm0.002$ & $0.263\pm0.005$ & $-1.01\%$ \\
+                  & Local cache-hit tokens & 63,488 & 63,488 & no change \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+
+\begin{table}[t]
+  \centering
+  \caption{Periodic-reuse mechanism result.}
+  \label{tab:return}
+  \begin{tabular}{lrr}
+    \toprule
+    Metric & PEEK & H-PEEK \\
+    \midrule
+    Return TTFT (ms) & $272.5\pm0.8$ & $50.9\pm2.0$ \\
+    Return TTFT change & --- & $-81.3\%$ \\
+    Workload hit tokens & 8,976 & 11,968 \\
+    Workload compute tokens & 78,155 & 75,163 \\
+    Extra retained prefix & 0 & 2,992 tokens \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Strong hotspot-switch experiment}
+
+Both sides of the strong-switch experiment are complete. H-PEEK does not reduce
+new-set cache hits under the default scan cap, but it adds measurable CPU-path
+overhead. The free-queue scan cap limits global LFU-like reordering and thereby
+preserves substantial recency behavior even when old prefixes have larger
+historical counts.
+
+\begin{table}[t]
+  \centering
+  \caption{Strong hotspot-switch results. Values are mean $\pm$ sample
+  standard deviation over three seeds.}
+  \label{tab:strong-switch-progress}
+  \begin{tabular}{lrr}
+    \toprule
+    Metric & PEEK & H-PEEK \\
+    \midrule
+    Full workload requests/s & $9.171\pm0.091$ & $9.080\pm0.066$ \\
+    Full workload throughput change & --- & $-1.00\%$ \\
+    Full workload TTFT P95 (s) & $0.270\pm0.001$ & $0.272\pm0.001$ \\
+    New-set return requests/s & $21.887\pm0.072$ & $21.140\pm0.334$ \\
+    New-set return throughput change & --- & $-3.41\%$ \\
+    New-set return TTFT P95 (s) & $0.049\pm0.002$ & $0.051\pm0.002$ \\
+    New-set return TTFT P95 change & --- & $+4.10\%$ \\
+    New-set return hit tokens & 56,848 & 56,848 \\
+    New-set return compute tokens & $262\pm5$ & $262\pm5$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{History-evidence gate ablation}
+
+The first H-PEEK ablation ignores historical frequency one: a block must occur
+in at least two admitted requests before its history term contributes to the
+protection score. The default configuration is denoted H-PEEK-$m{=}1$ and the
+gated configuration H-PEEK-$m{=}2$. Both use a 256-request window and the same
+PEEK cLPM scheduler. The gate preserves the positive periodic-reuse outcome:
+the aggregate cached-token count is 35,904 for both history variants, compared
+with 26,928 for PEEK on the same trace. It also reduces the stale-history
+workload's CPU-side history ranking substantially.
+
+\begin{table*}[t]
+  \centering
+  \small
+  \caption{Minimum historical-frequency ablation at 4,096 KV blocks. Values are
+  mean $\pm$ sample standard deviation over three seeds. TTFT values are in ms.}
+  \label{tab:min-frequency}
+  \begin{tabular}{llrrr}
+    \toprule
+    Workload & Metric & PEEK & H-PEEK-$m{=}1$ & H-PEEK-$m{=}2$ \\
+    \midrule
+    Periodic reuse & Requests/s & $4.015\pm0.021$ & $4.171\pm0.013$ & $4.182\pm0.010$ \\
+                   & Return TTFT & $272.5\pm0.8$ & $46.5\pm3.2$ & $47.1\pm0.7$ \\
+    Stale-history & Requests/s & $8.999\pm0.055$ & $9.147\pm0.131$ & $9.082\pm0.026$ \\
+                  & Return TTFT & $46.9\pm4.7$ & $46.4\pm4.3$ & $49.4\pm1.3$ \\
+    Singleton & Requests/s & $12.908\pm0.051$ & $12.876\pm0.045$ & $12.907\pm0.053$ \\
+              & TTFT P95 & $763.4\pm2.8$ & $666.3\pm84.5$ & $713.2\pm84.8$ \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+
+\begin{table}[t]
+  \centering
+  \caption{Matched H-PEEK profile for the three-workload ablation.}
+  \label{tab:min-frequency-overhead}
+  \begin{tabular}{lrrr}
+    \toprule
+    Counter & $m{=}1$ & $m{=}2$ & Change \\
+    \midrule
+    Blocks scanned & 90,462 & 56,484 & $-37.6\%$ \\
+    Eviction time (ms) & 346.5 & 192.5 & $-44.4\%$ \\
+    History lookups & 53,451 & 19,486 & $-63.6\%$ \\
+    Lookup time (ms) & 99.5 & 38.5 & $-61.3\%$ \\
+    Changed priorities & 53,451 & 11,307 & $-78.8\%$ \\
+    Observe time (ms) & 177.5 & 179.6 & $+1.1\%$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The gate is therefore a promising overhead optimization, but the current
+three-seed latency differences are noisy and do not establish a universal
+performance gain. The next experiment should test whether the same reduction
+holds under open-loop load and whether a threshold of two misses legitimate
+low-frequency reuse.
+
+\subsection{History-window sensitivity}
+
+The window-sensitivity run uses an 80-request absence gap. PEEK misses the
+returning prefix in every seed and recomputes all 3,007 prompt tokens. H-PEEK
+with $W=64$ also misses in every seed, confirming exact expiration in admitted-
+request units. With $W=256$, H-PEEK instead retains 2,992 tokens and computes
+only 15, reducing mean return TTFT from $268.6\pm2.0$ to $43.5\pm6.6$ ms
+(83.8\%). $W=512$ produces the same exact hit/compute outcome and a
+$45.7\pm0.8$ ms return TTFT. Thus, extending the window beyond the reuse
+distance adds no cache-hit benefit on this trace.
+
+\begin{table}[t]
+  \centering
+  \caption{History-window sensitivity after an 80-request absence gap. Values
+  are means over three seeds unless shown with standard deviation.}
+  \label{tab:window-progress}
+  \begin{tabular}{lrrrrr}
+    \toprule
+    Metric & PEEK & $W=32$ & $W=64$ & $W=256$ & $W=512$ \\
+    \midrule
+    Return hit tokens & 0 & 0 & 0 & 2,992 & 2,992 \\
+    Return compute tokens & 3,007 & 3,007 & 3,007 & 15 & 15 \\
+    Return TTFT (ms) & $268.6\pm2.0$ & $267.5\pm2.8$ & $268.9\pm1.3$ & $43.5\pm6.6$ & $45.7\pm0.8$ \\
+    Workload requests/s & $9.072\pm0.056$ & $9.145\pm0.101$ & $9.074\pm0.026$ & $9.290\pm0.069$ & $9.273\pm0.003$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{KV-capacity sweep in progress}
+
+The paired 2,048-block runs are complete. Under this stronger pressure, the
+periodic hot prefix is absent on PEEK return, as at 4,096 blocks. H-PEEK retains
+2,992 tokens, reduces return TTFT by 81.8\%, and improves full-workload
+throughput by 2.88\%. At 8,192 blocks, both policies already retain all 2,992
+reusable tokens. H-PEEK then provides no hit benefit and reduces throughput by
+0.63\%, isolating its low-pressure management overhead.
+
+\begin{table}[t]
+  \centering
+  \caption{Periodic-reuse capacity sweep. Return hit tokens and TTFT are means
+  over three seeds; dashes denote unfinished paired runs.}
+  \label{tab:capacity-progress}
+  \begin{tabular}{rrrll}
+    \toprule
+    Blocks & Policy & Return hits & Return TTFT (ms) & Requests/s \\
+    \midrule
+    2,048 & PEEK & 0 & $266.1\pm2.1$ & $4.057\pm0.015$ \\
+          & H-PEEK & 2,992 & $48.5\pm1.1$ & $4.173\pm0.007$ \\
+    4,096 & PEEK & 0 & $272.5\pm0.8$ & $4.015\pm0.021$ \\
+          & H-PEEK & 2,992 & $50.9\pm2.0$ & $4.118\pm0.014$ \\
+    8,192 & PEEK & 2,992 & $47.0\pm0.7$ & $4.202\pm0.011$ \\
+          & H-PEEK & 2,992 & $48.2\pm0.8$ & $4.176\pm0.011$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Open-loop offered load and fairness}
+
+Each run contains
+64 requests in a randomized 50/50 mixture: hot requests share a 2,048-token
+prefix, while cold requests have unique 2,048-token prefixes. Inter-arrival
+times are deterministic at the configured rate, and results are means over
+three prefix-identity/order seeds. Both policies sustain the offered rate
+through 8 requests/s, approach saturation at 12 requests/s, and saturate near
+12 requests/s when offered 16. The client-side dispatch-lag P95 is at most
+15.5 ms, so the observed multi-second tail at overload is not explained by the
+load generator. Prefix-cache state is reset between runs. The history tracker
+remains live within each policy server process; disjoint per-run Prefix IDs
+prevent cross-run reuse, while retaining steady-state bounded-window overhead.
+
+\begin{table*}[t]
+  \centering
+  \small
+  \caption{Open-loop latency at 4,096 KV blocks. Latencies are seconds;
+  values are mean $\pm$ sample standard deviation over three seeds.}
+  \label{tab:open-loop-latency}
+  \begin{tabular}{rrlrrrrr}
+    \toprule
+    Offered & Policy & Throughput & TTFT P50 & TTFT P95 & TTFT P99 & $\Delta$ throughput & $\Delta$ P95 \\
+    \midrule
+    4 & PEEK   & $4.021\pm0.024$ & $0.192\pm0.000$ & $0.198\pm0.001$ & $0.218\pm0.030$ & --- & --- \\
+      & H-PEEK & $4.021\pm0.023$ & $0.192\pm0.000$ & $0.197\pm0.001$ & $0.215\pm0.029$ & $+0.02\%$ & $-0.15\%$ \\
+    8 & PEEK   & $7.968\pm0.090$ & $0.200\pm0.006$ & $0.375\pm0.076$ & $0.458\pm0.098$ & --- & --- \\
+      & H-PEEK & $7.967\pm0.092$ & $0.199\pm0.003$ & $0.381\pm0.073$ & $0.459\pm0.097$ & $-0.01\%$ & $+1.80\%$ \\
+    12 & PEEK   & $11.426\pm0.162$ & $0.388\pm0.020$ & $0.901\pm0.375$ & $1.038\pm0.461$ & --- & --- \\
+       & H-PEEK & $11.406\pm0.144$ & $0.394\pm0.020$ & $0.960\pm0.467$ & $1.048\pm0.456$ & $-0.18\%$ & $+6.57\%$ \\
+    16 & PEEK   & $12.020\pm0.026$ & $0.494\pm0.011$ & $2.089\pm0.387$ & $2.671\pm0.734$ & --- & --- \\
+       & H-PEEK & $11.994\pm0.009$ & $0.496\pm0.012$ & $2.100\pm0.375$ & $2.679\pm0.725$ & $-0.21\%$ & $+0.51\%$ \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+
+\begin{table*}[t]
+  \centering
+  \small
+  \caption{Open-loop class latency and fairness. TTFT values are seconds.}
+  \label{tab:open-loop-fairness}
+  \begin{tabular}{rrlrrrr}
+    \toprule
+    Offered & Policy & Hot mean TTFT & Cold mean TTFT & Jain equity & TTFT $>1$s & Hit tokens \\
+    \midrule
+    4 & PEEK   & $0.046\pm0.001$ & $0.196\pm0.001$ & $0.722\pm0.003$ & 0 & 190,464 \\
+      & H-PEEK & $0.046\pm0.001$ & $0.196\pm0.001$ & $0.721\pm0.004$ & 0 & 190,464 \\
+    8 & PEEK   & $0.103\pm0.004$ & $0.263\pm0.011$ & $0.840\pm0.011$ & 0 & 190,464 \\
+      & H-PEEK & $0.105\pm0.003$ & $0.266\pm0.014$ & $0.842\pm0.014$ & 0 & 190,464 \\
+    12 & PEEK   & $0.302\pm0.010$ & $0.538\pm0.099$ & $0.927\pm0.036$ & $2.1\%\pm3.6\%$ & 190,464 \\
+       & H-PEEK & $0.306\pm0.012$ & $0.544\pm0.096$ & $0.928\pm0.033$ & $2.1\%\pm3.6\%$ & 190,464 \\
+    16 & PEEK   & $0.423\pm0.021$ & $1.145\pm0.109$ & $0.826\pm0.012$ & $23.4\%\pm1.6\%$ & 190,464 \\
+       & H-PEEK & $0.428\pm0.018$ & $1.150\pm0.103$ & $0.827\pm0.012$ & $23.4\%\pm1.6\%$ & 190,464 \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+
+The two policies have identical cache-hit and recompute-token counts at every
+load point. H-PEEK therefore provides no caching opportunity on this workload;
+the paired data isolate overhead. Its throughput change ranges from $+0.02\%$
+to $-0.21\%$. The largest mean P95 increase is 6.57\% at 12 requests/s, but
+the across-seed standard deviation is 0.467 s and P99 rises only 0.96\%; more
+repetitions are required before treating this noisy P95 difference as a stable
+regression. Jain equity is computed over inverse mean hot/cold TTFT, so 1.0
+denotes equal class-level service rate; neither fairness nor the one-second SLO
+fraction changes materially.
+
+The minimum-evidence gate also preserves the open-loop cache outcome: all four
+offered loads have the same 190,464 cached prompt tokens for PEEK, H-PEEK-$m{=}1$,
+and H-PEEK-$m{=}2$. Relative to the default history policy, the gate changes
+throughput by at most $+0.04\%$ and keeps the 16-request/s P95 within 0.3\%.
+
+\begin{table*}[t]
+  \centering
+  \small
+  \caption{Open-loop minimum-evidence gate. Values are mean $\pm$ sample
+  standard deviation over three seeds; TTFT P95 is in seconds.}
+  \label{tab:open-loop-gate}
+  \begin{tabular}{rllrr}
+    \toprule
+    Offered & Policy & Throughput & TTFT P95 & Jain equity \\
+    \midrule
+    4  & H-PEEK-$m{=}1$ & $4.021\pm0.023$ & $0.197\pm0.001$ & $0.721\pm0.004$ \\
+       & H-PEEK-$m{=}2$ & $4.022\pm0.022$ & $0.198\pm0.002$ & $0.720\pm0.002$ \\
+    8  & H-PEEK-$m{=}1$ & $7.967\pm0.092$ & $0.381\pm0.073$ & $0.842\pm0.014$ \\
+       & H-PEEK-$m{=}2$ & $7.968\pm0.093$ & $0.383\pm0.075$ & $0.842\pm0.017$ \\
+    12 & H-PEEK-$m{=}1$ & $11.406\pm0.144$ & $0.960\pm0.467$ & $0.928\pm0.033$ \\
+       & H-PEEK-$m{=}2$ & $11.409\pm0.126$ & $0.906\pm0.366$ & $0.927\pm0.034$ \\
+    16 & H-PEEK-$m{=}1$ & $11.994\pm0.009$ & $2.100\pm0.375$ & $0.827\pm0.012$ \\
+       & H-PEEK-$m{=}2$ & $12.000\pm0.024$ & $2.094\pm0.376$ & $0.824\pm0.009$ \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+
+In the matched open-loop profile, the gate reduces blocks scanned by 28.3%,
+eviction time by 39.9%, history lookups by 89.9%, and lookup time by 87.5%.
+This is consistent with the three-workload profile and indicates that the gate
+reduces real scheduler work rather than only changing an offline score.
+
+\subsection{Internal overhead}
+
+The profile in Table~\ref{tab:overhead} covers 720 admitted requests across the
+four completed workloads. End-to-end singleton throughput remains nearly
+unchanged because GPU execution dominates this small experiment, but H-PEEK's
+CPU-side scan cost is materially larger and should not be hidden.
+
+\begin{table}[t]
+  \centering
+  \caption{Aggregate scheduler/eviction profile.}
+  \label{tab:overhead}
+  \begin{tabular}{lrr}
+    \toprule
+    Counter & PEEK & H-PEEK \\
+    \midrule
+    Eviction calls & 1,016 & 1,014 \\
+    Blocks scanned & 38,478 & 91,446 \\
+    Eviction time (ms) & 101.6 & 341.1 \\
+    History observations & 0 & 720 \\
+    History update time (ms) & 0 & 205.3 \\
+    History lookups & 0 & 53,953 \\
+    History lookup time (ms) & 0 & 90.1 \\
+    Lookup time/candidate ($\mu$s) & --- & 1.67 \\
+    Window key references & 0 & 33,308 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The open-loop profile provides a second overhead measurement over 768 admitted
+requests. Both policies execute exactly 1,164 eviction calls. H-PEEK scans
+40.1\% more blocks and spends 81.6\% more profiled time in eviction; its
+history admission update costs 0.287 ms/request and each historical lookup
+costs 1.64 $\mu$s on average.
+
+\begin{table}[t]
+  \centering
+  \caption{Open-loop aggregate CPU-path profile.}
+  \label{tab:open-loop-overhead}
+  \begin{tabular}{lrr}
+    \toprule
+    Counter & PEEK & H-PEEK \\
+    \midrule
+    Admitted requests & 768 & 768 \\
+    Eviction calls & 1,164 & 1,164 \\
+    Blocks scanned & 51,152 & 71,686 \\
+    Eviction time (ms) & 113.8 & 206.7 \\
+    History update time (ms) & 0 & 220.1 \\
+    History lookups & 0 & 22,445 \\
+    History lookup time (ms) & 0 & 36.9 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Interpretation and Threats to Validity}
+
+The periodic result demonstrates the intended mechanism: PEEK cannot observe a
+future request while its prefix is absent from the queue, whereas admitted-
+request frequency retains the prefix. The singleton and queue-sharing results
+show no large end-to-end regression at this scale. However, the 2.38$\times$
+scan-volume increase and 3.36$\times$ aggregate eviction-time increase are real
+costs. The strong-switch experiment does not show a cache-hit regression under
+the default scan cap, but its new-set return phase is 3.41\% slower and has
+4.10\% higher TTFT P95. Thus, the immediate observed failure mode is CPU scan
+overhead rather than stale-history cache pollution.
+
+The study currently uses one model size, one GPU, one cache block size, three
+prefix-identity seeds, and synthetic traces. Server startup is excluded, but
+request execution is not repeated enough for publication-grade tail-latency
+claims. A complete evaluation must include policy-order randomization, more
+seeds, confidence intervals, capacity and history-window sweeps, 7B validation,
+and the full PEEK paper workloads. The open-loop process resets KV-cache state
+but not tracker history between its 12 disjoint-prefix runs. This preserves a
+steady-state 256-request tracker footprint, but a publication run should add an
+explicit tracker-reset hook or restart the server per run to separate cold and
+steady-state overhead.
+
+\section{Planned Ablations}
+
+If strong-switch pollution is observed, we will evaluate bounded historical
+scores, minimum-frequency activation, and request-index aging. Request-index
+aging is based on admitted-request distance rather than wall-clock block access
+time, keeping it conceptually distinct from PEEK's existing recency and decay
+modes. For overhead, we will test a fast path that bypasses history-aware scans
+when history supplies no rank discrimination, such as an all-singleton trace.
+
+\section{Reproducibility}
+
+Raw JSON results, engine profiles, environment pins, and the patch relative to
+the official PEEK commit are stored in the artifact repository. The benchmark
+driver records exact tokenized prefix lengths and obtains metric deltas from
+vLLM's Prometheus endpoint. Administrative cache reset endpoints are enabled
+only on the loopback interface for experimental isolation.
+
+\end{document}
