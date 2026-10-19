@@ -1,0 +1,18 @@
+{
+  "sync_calls": 142,
+  "sync_skipped": 84,
+  "sync_ns": 14208250,
+  "insert_calls": 29,
+  "insert_ns": 3179800,
+  "discard_calls": 29,
+  "discard_ns": 3386925,
+  "calc_priority_calls": 113,
+  "calc_priority_fallbacks": 0,
+  "calc_priority_ns": 320030,
+  "evict_calls": 55,
+  "evict_demand_aware": 29,
+  "evict_fallback": 26,
+  "evict_ns": 8634553,
+  "evict_scanned": 3331,
+  "evict_zero_demand_picked": 2435
+}

@@ -1,0 +1,628 @@
+diff --git a/python/peek/online/engines/vllm/patch_hook.py b/python/peek/online/engines/vllm/patch_hook.py
+index b8983e5..46022ca 100644
+--- a/python/peek/online/engines/vllm/patch_hook.py
++++ b/python/peek/online/engines/vllm/patch_hook.py
+@@ -50,10 +50,6 @@ blocks (and beyond that, to stock LRU). The inverted index
+ the PendingTree, so eviction overhead is amortized.
+
+ Caveats:
+-  - Only the `plain` eviction mode is supported on vllm. The
+-    demand_recency / demand_cluster / demand_decay variants in peek's
+-    sglang path rely on per-node last_access_time and ancestor walks
+-    that don't translate to vllm's hash-based block model.
+   - `PEEK_ONLINE_EVICTION_SCAN_CAP` (default 4xN, min 256) bounds the per-call
+     free-queue scan to keep overhead bounded on large pools.
+ """
+@@ -117,6 +113,8 @@ _EVICTION_MIN_SCAN_CAP = 256
+ #   cluster  -- priority = demand x (1 + max_chain_depth)         (depth-of-sharing)
+ #   recency  -- priority = demand − W x age_seconds                (linear aging)
+ #   decay    -- priority = demand x exp(−age_seconds / τ)          (exponential aging)
++#   history_only -- priority = alpha x admitted-request frequency
++#   history  -- priority = demand + alpha x admitted-request frequency
+ #
+ # `cluster` needs `_block_hash_max_depth[h]` (deepest position in any pending
+ # rid's prefix chain) -- maintained on _bump_rid, cleared on demand-zero.
+@@ -124,7 +122,9 @@ _EVICTION_MIN_SCAN_CAP = 256
+ # doesn't track natively. Peek fabricates it by patching `BlockPool.touch`
+ # (cache-hit stamps) and `BlockPool.cache_full_blocks` (initial-cache stamps).
+ _EVICTION_MODE = os.environ.get("PEEK_ONLINE_EVICTION_MODE", "plain").lower()
+-if _EVICTION_MODE not in ("plain", "cluster", "recency", "decay"):
++if _EVICTION_MODE not in (
++    "plain", "cluster", "recency", "decay", "history_only", "history"
++):
+     import warnings
+     warnings.warn(
+         f"peek.vllm: PEEK_ONLINE_EVICTION_MODE={_EVICTION_MODE!r} not recognized. "
+@@ -138,6 +138,25 @@ _EVICTION_RECENCY_W = float(os.environ.get("PEEK_ONLINE_EVICTION_RECENCY_W", "10
+ _EVICTION_DECAY_TAU = float(os.environ.get("PEEK_ONLINE_EVICTION_DECAY_TAU", "30"))
+ # True iff the mode needs per-block last_access_time (drives BlockPool patches).
+ _EVICTION_NEEDS_LAST_ACCESS = _EVICTION_MODE in ("recency", "decay")
++_HISTORY_ENABLED = _EVICTION_MODE in ("history_only", "history")
++_HISTORY_INCLUDE_WAITING = _EVICTION_MODE == "history"
++_HISTORY_WINDOW = int(os.environ.get("HPEEK_HISTORY_WINDOW", "256"))
++_HISTORY_WEIGHT = float(os.environ.get("HPEEK_HISTORY_WEIGHT", "1.0"))
++_HISTORY_MIN_FREQUENCY = int(
++    os.environ.get("HPEEK_HISTORY_MIN_FREQUENCY", "1")
++)
++_HISTORY_MAX_KEYS_PER_REQUEST = int(
++    os.environ.get("HPEEK_HISTORY_MAX_KEYS_PER_REQUEST", "4096")
++)
++if _HISTORY_ENABLED:
++    if _HISTORY_WINDOW <= 0:
++        raise ValueError("HPEEK_HISTORY_WINDOW must be positive")
++    if _HISTORY_WEIGHT < 0:
++        raise ValueError("HPEEK_HISTORY_WEIGHT must be non-negative")
++if _HISTORY_MIN_FREQUENCY <= 0:
++    raise ValueError("HPEEK_HISTORY_MIN_FREQUENCY must be positive")
++    if _HISTORY_MAX_KEYS_PER_REQUEST <= 0:
++        raise ValueError("HPEEK_HISTORY_MAX_KEYS_PER_REQUEST must be positive")
+ _VALIDATE_PATH = os.environ.get(
+     "PEEK_ONLINE_VALIDATE_PATH", "/tmp/peek_validate_{pid}.json"
+ )
+@@ -159,6 +178,12 @@ _prof: dict = {
+     "calc_priority_calls": 0, "calc_priority_fallbacks": 0, "calc_priority_ns": 0,
+     "evict_calls": 0, "evict_demand_aware": 0, "evict_fallback": 0,
+     "evict_ns": 0, "evict_scanned": 0, "evict_zero_demand_picked": 0,
++    "history_observe_calls": 0, "history_observe_ns": 0,
++    "history_lookup_calls": 0, "history_lookup_ns": 0,
++    "history_zero_waiting_candidates": 0,
++    "history_changed_zero_waiting_priority": 0,
++    "history_tracked_keys": 0, "history_requests_in_window": 0,
++    "history_key_references_in_window": 0,
+ }
+
+
+@@ -166,19 +191,34 @@ def _install() -> None:
+     """Install monkey-patches on vllm v1 scheduler. Idempotent per-process:
+     guards with a flag on the Scheduler class so a second import is a no-op."""
+     from peek import PendingTree
++    from peek.online.history import (
++        HistoricalPrefixTracker,
++        history_protection_score,
++    )
+
+     from vllm.v1.core.sched.scheduler import Scheduler
+     from vllm.v1.core.sched.request_queue import (
+         FCFSRequestQueue,
+     )
+     from vllm.v1.core.block_pool import BlockPool
+-    from vllm.v1.core.kv_cache_utils import get_block_hash
++    from vllm.v1.core.kv_cache_utils import (
++        BlockHashListWithBlockSize,
++        get_block_hash,
++        make_block_hash_with_group_id,
++    )
+
+     if getattr(Scheduler, "_peek_installed", False):
+         return
+     Scheduler._peek_installed = True
+
+     peek_tree = PendingTree()
++    history_tracker = (
++        HistoricalPrefixTracker(
++            window_size=_HISTORY_WINDOW,
++            max_keys_per_request=_HISTORY_MAX_KEYS_PER_REQUEST,
++        )
++        if _HISTORY_ENABLED else None
++    )
+
+     # rid (vllm uses str) -> u64 interned rid for peek, plus the reverse map so
+     # a departing rid can be evicted from both without scanning. Pure working
+@@ -230,6 +270,35 @@ def _install() -> None:
+     _block_hash_last_access: dict = {}
+     _rid_to_hashes: dict[int, list] = {}
+
++    def _history_keys_for_request(req, kv_cache_manager) -> list:
++        """Build exact BlockHashWithGroupId keys for one request.
++
++        vLLM computes request hashes at ``hash_block_size`` granularity, while
++        individual KV cache groups may use a larger block size. Reuse vLLM's
++        own conversion and group-id packing so history never aliases blocks
++        from different KV cache groups.
++        """
++        raw_hashes = getattr(req, "block_hashes", None)
++        if not raw_hashes:
++            return []
++        hash_block_size = kv_cache_manager.block_pool.hash_block_size
++        keys = []
++        for group_id, group in enumerate(
++            kv_cache_manager.kv_cache_config.kv_cache_groups
++        ):
++            block_size = group.kv_cache_spec.block_size
++            if block_size == hash_block_size:
++                group_hashes = raw_hashes
++            else:
++                group_hashes = BlockHashListWithBlockSize(
++                    raw_hashes, hash_block_size, block_size
++                )
++            keys.extend(
++                make_block_hash_with_group_id(block_hash, group_id)
++                for block_hash in group_hashes
++            )
++        return keys
++
+     def _bump_rid(req, rid_int: int) -> None:
+         """Snapshot req.block_hashes and increment demand counts. In cluster
+         mode also bump per-hash max-chain-depth."""
+@@ -501,11 +570,51 @@ def _install() -> None:
+
+     def _patched_schedule(self):
+         wq_list = list(self.waiting)
++        # Only requests in their initial WAITING state are eligible to become
++        # a history observation. PREEMPTED requests may be emitted as new
++        # request data by some vLLM runner variants, but must never be counted
++        # again when they resume.
++        first_admission_candidates = (
++            {
++                req.request_id: req
++                for req in wq_list
++                if getattr(getattr(req, "status", None), "name", None)
++                == "WAITING"
++            }
++            if history_tracker is not None else {}
++        )
+         _sync(wq_list)
+         if _VALIDATE:
+             _validate_sync(wq_list)
+         _reorder_waiting(self)
+-        return _orig_schedule(self)
++        result = _orig_schedule(self)
++        if history_tracker is not None:
++            # Remove newly admitted requests from current waiting demand before
++            # promoting them into cross-request history. This keeps the two
++            # terms independent at the next eviction decision.
++            _sync(self.waiting)
++            for admitted in result.scheduled_new_reqs:
++                req = first_admission_candidates.get(admitted.req_id)
++                if req is None:
++                    continue
++                ht0 = _time.perf_counter_ns() if _PROFILE else 0
++                history_tracker.observe(
++                    _history_keys_for_request(req, self.kv_cache_manager)
++                )
++                if _PROFILE:
++                    snapshot = history_tracker.snapshot()
++                    _prof["history_observe_calls"] += 1
++                    _prof["history_observe_ns"] += (
++                        _time.perf_counter_ns() - ht0
++                    )
++                    _prof["history_tracked_keys"] = snapshot.tracked_keys
++                    _prof["history_requests_in_window"] = (
++                        snapshot.requests_in_window
++                    )
++                    _prof["history_key_references_in_window"] = (
++                        snapshot.key_references_in_window
++                    )
++        return result
+
+     Scheduler.schedule = _patched_schedule
+
+@@ -542,7 +651,12 @@ def _install() -> None:
+                 self, request_ids, *args, **kwargs,
+             )
+             try:
+-                if isinstance(request_ids, str):
++                if request_ids is None:
++                    # vLLM uses None to mean "finish all requests" during
++                    # shutdown. Snapshot the currently tracked waiting IDs so
++                    # PEEK can clear them without attempting tuple(None).
++                    rids_iter = tuple(_last_rids)
++                elif isinstance(request_ids, str):
+                     rids_iter = (request_ids,)
+                 else:
+                     rids_iter = tuple(request_ids)
+@@ -579,10 +693,19 @@ def _install() -> None:
+                     _prof["evict_fallback"] += 1
+                     _prof["evict_ns"] += _time.perf_counter_ns() - te
+                 return _orig_get_new_blocks(self, num_blocks)
+-            # If we have no demand signal at all, defer to stock LRU. Pure
+-            # stock behavior with one extra branch -- preserves perf parity
+-            # when peek isn't holding any pending state yet.
+-            if not _block_hash_demand:
++            # Defer to stock LRU only when the active policy has no usable
++            # signal. In joint-history mode, an empty waiting queue is not
++            # enough to fall back if cross-request history is still valid.
++            has_waiting_signal = bool(_block_hash_demand)
++            has_history_signal = bool(history_tracker)
++            if (
++                (not _HISTORY_ENABLED and not has_waiting_signal)
++                or (
++                    _HISTORY_ENABLED
++                    and not has_history_signal
++                    and (not _HISTORY_INCLUDE_WAITING or not has_waiting_signal)
++                )
++            ):
+                 if _PROFILE:
+                     _prof["evict_calls"] += 1
+                     _prof["evict_fallback"] += 1
+@@ -607,7 +730,32 @@ def _install() -> None:
+                 else:
+                     raw = get_block_hash(bh)
+                     d = _block_hash_demand.get(raw, 0)
+-                    if d == 0:
++                    if _HISTORY_ENABLED:
++                        ht0 = _time.perf_counter_ns() if _PROFILE else 0
++                        historical_frequency = history_tracker.frequency(bh)
++                        priority = history_protection_score(
++                            waiting_demand=d,
++                            historical_frequency=historical_frequency,
++                            history_weight=_HISTORY_WEIGHT,
++                            include_waiting=_HISTORY_INCLUDE_WAITING,
++                            min_frequency=_HISTORY_MIN_FREQUENCY,
++                        )
++                        if _PROFILE:
++                            _prof["history_lookup_calls"] += 1
++                            _prof["history_lookup_ns"] += (
++                                _time.perf_counter_ns() - ht0
++                            )
++                            if d == 0:
++                                _prof["history_zero_waiting_candidates"] += 1
++                                if historical_frequency >= _HISTORY_MIN_FREQUENCY:
++                                    _prof[
++                                        "history_changed_zero_waiting_priority"
++                                    ] += 1
++                        if priority <= 0:
++                            picked.append(cur)
++                        else:
++                            low_demand.append((priority, scanned, cur))
++                    elif d == 0:
+                         picked.append(cur)
+                     else:
+                         # Per-mode priority. Higher = more protected.
+@@ -686,6 +834,7 @@ def _install() -> None:
+         _peek_get_new_blocks._block_hash_demand = _block_hash_demand
+         _peek_get_new_blocks._block_hash_max_depth = _block_hash_max_depth
+         _peek_get_new_blocks._block_hash_last_access = _block_hash_last_access
++        _peek_get_new_blocks._history_tracker = history_tracker
+         BlockPool.get_new_blocks = _peek_get_new_blocks
+         _log.warning(
+             "peek: BlockPool.get_new_blocks patched (eviction mode=%s)",
+diff --git a/python/peek/online/eviction.py b/python/peek/online/eviction.py
+index 3910b59..2226e98 100644
+--- a/python/peek/online/eviction.py
++++ b/python/peek/online/eviction.py
+@@ -65,12 +65,15 @@ _EVICTION_MODE_ALIASES = {
+ }
+ _RAW_EVICTION_MODE = os.environ.get("PEEK_ONLINE_EVICTION_MODE", "plain").lower()
+ _EVICTION_MODE = _EVICTION_MODE_ALIASES.get(_RAW_EVICTION_MODE, _RAW_EVICTION_MODE)
+-if _EVICTION_MODE not in ("plain", "cluster", "recency", "decay"):
++if _EVICTION_MODE not in (
++    "plain", "cluster", "recency", "decay", "history_only", "history"
++):
+     import warnings as _warnings
+     _warnings.warn(
+         f"peek.eviction: PEEK_ONLINE_EVICTION_MODE={_RAW_EVICTION_MODE!r} not "
+         f"recognized; falling back to 'plain'. Valid modes: "
+-        f"plain, cluster, recency, decay.",
++        f"plain, cluster, recency, decay, history_only, history "
++        f"(history modes are vLLM-only).",
+         stacklevel=2,
+     )
+     _EVICTION_MODE = "plain"
+@@ -155,6 +158,11 @@ class PeekDemandStrategy:
+     used without importing sglang at module load -- duck-typing is enough."""
+
+     def __init__(self, tree: PendingTree) -> None:
++        if _EVICTION_MODE in ("history_only", "history"):
++            raise ValueError(
++                "H-PEEK history eviction is currently implemented only for "
++                "vLLM V1, not SGLang's PeekDemandStrategy"
++            )
+         self.tree = tree
+
+     def get_priority(self, node) -> Tuple[int, float]:
+diff --git a/python/peek/online/history.py b/python/peek/online/history.py
+new file mode 100644
+index 0000000..5a259ee
+--- /dev/null
++++ b/python/peek/online/history.py
+@@ -0,0 +1,116 @@
++# Copyright 2026 H-PEEK contributors
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++# http://www.apache.org/licenses/LICENSE-2.0
++
++"""Bounded cross-request frequency tracking for H-PEEK.
++
++The tracker intentionally has no wall-clock decay.  It counts how many of the
++last ``window_size`` admitted requests contained a prefix-block key.  This is a
++different signal from PEEK's recency/decay modes, which use a cached block's
++last-access timestamp.
++"""
++
++from __future__ import annotations
++
++from collections import Counter, deque
++from collections.abc import Hashable, Iterable
++from dataclasses import dataclass
++
++
++@dataclass(frozen=True)
++class HistorySnapshot:
++    admitted_requests: int
++    requests_in_window: int
++    tracked_keys: int
++    key_references_in_window: int
++
++
++class HistoricalPrefixTracker:
++    """Exact, request-bounded prefix frequency tracker.
++
++    Each call to :meth:`observe` represents one *first admission* of an
++    independent request. Duplicate keys in one request count once. State is
++    bounded by ``window_size * max_keys_per_request`` key references, and keys
++    are removed from the counter as soon as their count reaches zero.
++    """
++
++    def __init__(self, window_size: int, max_keys_per_request: int = 4096) -> None:
++        if window_size <= 0:
++            raise ValueError("window_size must be positive")
++        if max_keys_per_request <= 0:
++            raise ValueError("max_keys_per_request must be positive")
++        self.window_size = window_size
++        self.max_keys_per_request = max_keys_per_request
++        self._window: deque[tuple[Hashable, ...]] = deque()
++        self._counts: Counter[Hashable] = Counter()
++        self._admitted_requests = 0
++        self._key_references = 0
++
++    def observe(self, keys: Iterable[Hashable]) -> None:
++        """Record the unique prefix-block keys of one admitted request."""
++        unique = tuple(dict.fromkeys(keys))
++        if len(unique) > self.max_keys_per_request:
++            unique = unique[: self.max_keys_per_request]
++
++        self._window.append(unique)
++        self._counts.update(unique)
++        self._admitted_requests += 1
++        self._key_references += len(unique)
++
++        if len(self._window) > self.window_size:
++            expired = self._window.popleft()
++            self._key_references -= len(expired)
++            for key in expired:
++                remaining = self._counts[key] - 1
++                if remaining <= 0:
++                    del self._counts[key]
++                else:
++                    self._counts[key] = remaining
++
++    def frequency(self, key: Hashable) -> int:
++        return self._counts.get(key, 0)
++
++    def clear(self) -> None:
++        self._window.clear()
++        self._counts.clear()
++        self._key_references = 0
++
++    def snapshot(self) -> HistorySnapshot:
++        return HistorySnapshot(
++            admitted_requests=self._admitted_requests,
++            requests_in_window=len(self._window),
++            tracked_keys=len(self._counts),
++            key_references_in_window=self._key_references,
++        )
++
++    def __bool__(self) -> bool:
++        return bool(self._counts)
++
++    def __len__(self) -> int:
++        return len(self._counts)
++
++
++def history_protection_score(
++    waiting_demand: int,
++    historical_frequency: int,
++    history_weight: float,
++    *,
++    include_waiting: bool,
++    min_frequency: int = 1,
++) -> float:
++    """Return the H-PEEK score, optionally ignoring weak history evidence."""
++    if waiting_demand < 0 or historical_frequency < 0:
++        raise ValueError("demand and frequency must be non-negative")
++    if history_weight < 0:
++        raise ValueError("history_weight must be non-negative")
++    if min_frequency <= 0:
++        raise ValueError("min_frequency must be positive")
++    waiting = waiting_demand if include_waiting else 0
++    historical = (
++        historical_frequency if historical_frequency >= min_frequency else 0
++    )
++    return waiting + history_weight * historical
+diff --git a/tests/online/test_history.py b/tests/online/test_history.py
+new file mode 100644
+index 0000000..1fbdb82
+--- /dev/null
++++ b/tests/online/test_history.py
+@@ -0,0 +1,93 @@
++"""CPU-only unit tests for H-PEEK's admitted-request history."""
++
++from peek.online.history import HistoricalPrefixTracker, history_protection_score
++
++
++def test_history_keeps_reused_a_when_waiting_demand_is_zero():
++    """Required P1 test: equally evictable A/B should retain historical A."""
++    tracker = HistoricalPrefixTracker(window_size=256)
++    for _ in range(4):
++        tracker.observe(["prefix-A"])
++
++    candidates = ["prefix-A", "prefix-B"]
++    scores = {
++        key: history_protection_score(
++            waiting_demand=0,
++            historical_frequency=tracker.frequency(key),
++            history_weight=1.0,
++            include_waiting=True,
++        )
++        for key in candidates
++    }
++
++    victim = min(candidates, key=scores.__getitem__)
++    assert victim == "prefix-B"
++    assert scores["prefix-A"] > scores["prefix-B"]
++
++
++def test_hotspot_switch_expires_old_prefix():
++    tracker = HistoricalPrefixTracker(window_size=3)
++    tracker.observe(["prefix-A"])
++    tracker.observe(["prefix-A"])
++    tracker.observe(["prefix-A"])
++    tracker.observe(["prefix-B"])
++    tracker.observe(["prefix-B"])
++    tracker.observe(["prefix-B"])
++
++    assert tracker.frequency("prefix-A") == 0
++    assert tracker.frequency("prefix-B") == 3
++
++
++def test_empty_history_has_zero_score_and_clean_fallback_signal():
++    tracker = HistoricalPrefixTracker(window_size=256)
++
++    assert not tracker
++    assert history_protection_score(0, tracker.frequency("missing"), 1.0,
++                                    include_waiting=True) == 0
++
++
++def test_duplicate_hash_counts_once_per_request():
++    tracker = HistoricalPrefixTracker(window_size=256)
++    tracker.observe(["A", "A", "A"])
++
++    assert tracker.frequency("A") == 1
++    assert tracker.snapshot().key_references_in_window == 1
++
++
++def test_window_and_per_request_cap_bound_memory():
++    tracker = HistoricalPrefixTracker(window_size=2, max_keys_per_request=2)
++    tracker.observe(["A", "B", "C"])
++    tracker.observe(["D", "E", "F"])
++    tracker.observe(["G", "H", "I"])
++
++    snapshot = tracker.snapshot()
++    assert snapshot.requests_in_window == 2
++    assert snapshot.key_references_in_window == 4
++    assert snapshot.tracked_keys == 4
++    assert tracker.frequency("A") == 0
++
++
++def test_history_only_ignores_waiting_demand():
++    assert history_protection_score(
++        99, 2, 1.0, include_waiting=False
++    ) == 2
++
++
++def test_min_frequency_gate_ignores_single_request_evidence():
++    assert history_protection_score(
++        0, 1, 1.0, include_waiting=True, min_frequency=2
++    ) == 0
++    assert history_protection_score(
++        0, 2, 1.0, include_waiting=True, min_frequency=2
++    ) == 2
++
++
++def test_kv_cache_group_is_part_of_history_identity():
++    tracker = HistoricalPrefixTracker(window_size=256)
++    raw_hash = b"same-prefix-hash"
++    group_zero = raw_hash + (0).to_bytes(4, "big")
++    group_one = raw_hash + (1).to_bytes(4, "big")
++    tracker.observe([group_zero])
++
++    assert tracker.frequency(group_zero) == 1
++    assert tracker.frequency(group_one) == 0
+diff --git a/tests/online/test_vllm_history_eviction.py b/tests/online/test_vllm_history_eviction.py
+new file mode 100644
+index 0000000..cefce5e
+--- /dev/null
++++ b/tests/online/test_vllm_history_eviction.py
+@@ -0,0 +1,88 @@
++"""Isolated CPU integration tests for H-PEEK's vLLM victim selection."""
++
++from __future__ import annotations
++
++import os
++import subprocess
++import sys
++import textwrap
++
++import pytest
++
++pytest.importorskip("vllm")
++
++pytestmark = pytest.mark.engine
++
++
++def _run_history_subprocess(body: str) -> subprocess.CompletedProcess:
++    env = os.environ.copy()
++    env.update(
++        {
++            "PEEK_ONLINE_SCHEDULER": "0",
++            "PEEK_ONLINE_EVICTION": "1",
++            "PEEK_ONLINE_CLPM": "0",
++            "PEEK_ONLINE_EVICTION_MODE": "history",
++            "HPEEK_HISTORY_WINDOW": "256",
++            "HPEEK_HISTORY_WEIGHT": "1.0",
++        }
++    )
++    return subprocess.run(
++        [sys.executable, "-c", textwrap.dedent(body)],
++        env=env,
++        text=True,
++        capture_output=True,
++        check=False,
++    )
++
++
++def test_zero_waiting_demand_retains_historically_reused_a():
++    result = _run_history_subprocess(
++        """
++        import peek.online.engines.vllm.patch_hook  # installs history mode
++        from vllm.v1.core.block_pool import BlockPool
++        from vllm.v1.core.kv_cache_utils import make_block_hash_with_group_id
++
++        pool = BlockPool(num_gpu_blocks=3, enable_caching=True, hash_block_size=16)
++        block_a, block_b = pool.get_new_blocks(2)
++        key_a = make_block_hash_with_group_id(b"prefix-A", 0)
++        key_b = make_block_hash_with_group_id(b"prefix-B", 0)
++        for block, key in ((block_a, key_a), (block_b, key_b)):
++            block.block_hash = key
++            pool.cached_block_hash_to_block.insert(key, block)
++        pool.free_blocks([block_a, block_b])
++
++        tracker = BlockPool.get_new_blocks._history_tracker
++        for _ in range(4):
++            tracker.observe([key_a])
++
++        victim = pool.get_new_blocks(1)[0]
++        assert victim.block_id == block_b.block_id, (
++            victim.block_id, block_a.block_id, block_b.block_id
++        )
++        assert block_a.block_hash == key_a
++        """
++    )
++    assert result.returncode == 0, result.stderr
++
++
++def test_no_history_uses_stock_free_queue_order():
++    result = _run_history_subprocess(
++        """
++        import peek.online.engines.vllm.patch_hook
++        from vllm.v1.core.block_pool import BlockPool
++        from vllm.v1.core.kv_cache_utils import make_block_hash_with_group_id
++
++        pool = BlockPool(num_gpu_blocks=3, enable_caching=True, hash_block_size=16)
++        block_a, block_b = pool.get_new_blocks(2)
++        key_a = make_block_hash_with_group_id(b"prefix-A", 0)
++        key_b = make_block_hash_with_group_id(b"prefix-B", 0)
++        for block, key in ((block_a, key_a), (block_b, key_b)):
++            block.block_hash = key
++            pool.cached_block_hash_to_block.insert(key, block)
++        pool.free_blocks([block_a, block_b])
++
++        victim = pool.get_new_blocks(1)[0]
++        assert victim.block_id == block_a.block_id
++        """
++    )
++    assert result.returncode == 0, result.stderr

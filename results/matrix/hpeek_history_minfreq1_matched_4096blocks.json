@@ -1,0 +1,261 @@
+{
+  "policy": "hpeek_history_minfreq1_matched",
+  "seeds": [
+    42,
+    142,
+    242
+  ],
+  "scenarios": [
+    "periodic_reuse",
+    "stale_history_pollution",
+    "singleton_overhead"
+  ],
+  "runs": [
+    {
+      "summary": {
+        "requests": 29,
+        "wall_s": 6.928938200697303,
+        "requests_per_s": 4.185345454095917,
+        "prompt_tokens_per_s": 12574.942577959702,
+        "ttft_mean_s": 0.2385966724491325,
+        "ttft_p50_s": 0.2673946227878332,
+        "ttft_p95_s": 0.27237853594124317,
+        "ttft_p99_s": 0.3101171273738146,
+        "e2e_p95_s": 0.2725714948028326
+      },
+      "return_request": {
+        "ttft_s": 0.04831896722316742,
+        "e2e_s": 0.04853598773479462,
+        "usage": {
+          "prompt_tokens": 3005,
+          "total_tokens": 3006,
+          "completion_tokens": 1
+        }
+      },
+      "metrics": {
+        "vllm:prefix_cache_queries_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 87131.0,
+        "vllm:prefix_cache_hits_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 11968.0,
+        "vllm:prompt_tokens_by_source_total{engine=\"0\",model_name=\"qwen2.5-3b\",source=\"local_compute\"}": 75163.0,
+        "vllm:prompt_tokens_by_source_total{engine=\"0\",model_name=\"qwen2.5-3b\",source=\"local_cache_hit\"}": 11968.0,
+        "vllm:prompt_tokens_cached_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 11968.0
+      },
+      "scenario": "periodic_reuse",
+      "seed": 42
+    },
+    {
+      "summary": {
+        "requests": 83,
+        "wall_s": 9.148950032889843,
+        "requests_per_s": 9.072079277034057,
+        "prompt_tokens_per_s": 27286.300515639265,
+        "ttft_mean_s": 0.10985799564654569,
+        "ttft_p50_s": 0.04638192430138588,
+        "ttft_p95_s": 0.2719089575111866,
+        "ttft_p99_s": 0.2896838802844286,
+        "e2e_p95_s": 0.27208462730050087
+      },
+      "return_request": {
+        "ttft_s": 0.04973396472632885,
+        "e2e_s": 0.049902623519301414,
+        "usage": {
+          "prompt_tokens": 3003,
+          "total_tokens": 3004,
+          "completion_tokens": 1
+        }
+      },
+      "metrics": {
+        "vllm:prefix_cache_queries_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 249641.0,
+        "vllm:prefix_cache_hits_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 176960.0,
+        "vllm:prompt_tokens_by_source_total{engine=\"0\",model_name=\"qwen2.5-3b\",source=\"local_compute\"}": 72681.0,
+        "vllm:prompt_tokens_by_source_total{engine=\"0\",model_name=\"qwen2.5-3b\",source=\"local_cache_hit\"}": 176987.0,
+        "vllm:prompt_tokens_cached_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 176960.0,
+        "vllm:prompt_tokens_recomputed_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 27.0
+      },
+      "scenario": "stale_history_pollution",
+      "seed": 42
+    },
+    {
+      "summary": {
+        "requests": 96,
+        "wall_s": 7.426390310749412,
+        "requests_per_s": 12.926872408125886,
+        "prompt_tokens_per_s": 13313.332031160484,
+        "ttft_mean_s": 0.5996937158245904,
+        "ttft_p50_s": 0.6108111906796694,
+        "ttft_p95_s": 0.7638220172375441,
+        "ttft_p99_s": 0.7813421878963709,
+        "e2e_p95_s": 0.7641187068074942
+      },
+      "metrics": {
+        "vllm:prefix_cache_queries_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 98870.0,
+        "vllm:prompt_tokens_by_source_total{engine=\"0\",model_name=\"qwen2.5-3b\",source=\"local_compute\"}": 98870.0
+      },
+      "scenario": "singleton_overhead",
+      "seed": 42
+    },
+    {
+      "summary": {
+        "requests": 29,
+        "wall_s": 6.955492550507188,
+        "requests_per_s": 4.16936684058203,
+        "prompt_tokens_per_s": 12526.934558163892,
+        "ttft_mean_s": 0.23954491400770073,
+        "ttft_p50_s": 0.26892828941345215,
+        "ttft_p95_s": 0.27848865650594234,
+        "ttft_p99_s": 0.29299972765147686,
+        "e2e_p95_s": 0.27861422672867775
+      },
+      "return_request": {
+        "ttft_s": 0.04275483824312687,
+        "e2e_s": 0.042917318642139435,
+        "usage": {
+          "prompt_tokens": 3005,
+          "total_tokens": 3006,
+          "completion_tokens": 1
+        }
+      },
+      "metrics": {
+        "vllm:prefix_cache_queries_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 87131.0,
+        "vllm:prefix_cache_hits_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 11968.0,
+        "vllm:prompt_tokens_by_source_total{engine=\"0\",model_name=\"qwen2.5-3b\",source=\"local_compute\"}": 75163.0,
+        "vllm:prompt_tokens_by_source_total{engine=\"0\",model_name=\"qwen2.5-3b\",source=\"local_cache_hit\"}": 11968.0,
+        "vllm:prompt_tokens_cached_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 11968.0
+      },
+      "scenario": "periodic_reuse",
+      "seed": 142
+    },
+    {
+      "summary": {
+        "requests": 83,
+        "wall_s": 8.926808720454574,
+        "requests_per_s": 9.297835609473376,
+        "prompt_tokens_per_s": 27969.79388926412,
+        "ttft_mean_s": 0.10725307397275086,
+        "ttft_p50_s": 0.043625034391880035,
+        "ttft_p95_s": 0.2706802021712065,
+        "ttft_p99_s": 0.289411811158061,
+        "e2e_p95_s": 0.2708729710429907
+      },
+      "return_request": {
+        "ttft_s": 0.04156864061951637,
+        "e2e_s": 0.04172628000378609,
+        "usage": {
+          "prompt_tokens": 3003,
+          "total_tokens": 3004,
+          "completion_tokens": 1
+        }
+      },
+      "metrics": {
+        "vllm:prefix_cache_queries_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 249681.0,
+        "vllm:prefix_cache_hits_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 176960.0,
+        "vllm:prompt_tokens_by_source_total{engine=\"0\",model_name=\"qwen2.5-3b\",source=\"local_compute\"}": 72721.0,
+        "vllm:prompt_tokens_by_source_total{engine=\"0\",model_name=\"qwen2.5-3b\",source=\"local_cache_hit\"}": 176987.0,
+        "vllm:prompt_tokens_cached_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 176960.0,
+        "vllm:prompt_tokens_recomputed_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 27.0
+      },
+      "scenario": "stale_history_pollution",
+      "seed": 142
+    },
+    {
+      "summary": {
+        "requests": 96,
+        "wall_s": 7.464881522580981,
+        "requests_per_s": 12.860217501055264,
+        "prompt_tokens_per_s": 13244.684420097228,
+        "ttft_mean_s": 0.6032708418012286,
+        "ttft_p50_s": 0.6135182324796915,
+        "ttft_p95_s": 0.6172893363982439,
+        "ttft_p99_s": 0.7590972613543272,
+        "e2e_p95_s": 0.6175926253199577
+      },
+      "metrics": {
+        "vllm:prefix_cache_queries_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 98870.0,
+        "vllm:prompt_tokens_by_source_total{engine=\"0\",model_name=\"qwen2.5-3b\",source=\"local_compute\"}": 98870.0
+      },
+      "scenario": "singleton_overhead",
+      "seed": 142
+    },
+    {
+      "summary": {
+        "requests": 29,
+        "wall_s": 6.973464893177152,
+        "requests_per_s": 4.15862135168611,
+        "prompt_tokens_per_s": 12494.64955150905,
+        "ttft_mean_s": 0.2401201627377806,
+        "ttft_p50_s": 0.2697278168052435,
+        "ttft_p95_s": 0.27455526776611805,
+        "ttft_p99_s": 0.29244937002658844,
+        "e2e_p95_s": 0.2747238092124462
+      },
+      "return_request": {
+        "ttft_s": 0.04828890971839428,
+        "e2e_s": 0.048375848680734634,
+        "usage": {
+          "prompt_tokens": 3005,
+          "total_tokens": 3006,
+          "completion_tokens": 1
+        }
+      },
+      "metrics": {
+        "vllm:prefix_cache_queries_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 87131.0,
+        "vllm:prefix_cache_hits_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 11968.0,
+        "vllm:prompt_tokens_by_source_total{engine=\"0\",model_name=\"qwen2.5-3b\",source=\"local_compute\"}": 75163.0,
+        "vllm:prompt_tokens_by_source_total{engine=\"0\",model_name=\"qwen2.5-3b\",source=\"local_cache_hit\"}": 11968.0,
+        "vllm:prompt_tokens_cached_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 11968.0
+      },
+      "scenario": "periodic_reuse",
+      "seed": 242
+    },
+    {
+      "summary": {
+        "requests": 83,
+        "wall_s": 9.151397425681353,
+        "requests_per_s": 9.069653096594738,
+        "prompt_tokens_per_s": 27283.374154347843,
+        "ttft_mean_s": 0.10995990825615015,
+        "ttft_p50_s": 0.04589753597974777,
+        "ttft_p95_s": 0.27333453111350536,
+        "ttft_p99_s": 0.29263059981167316,
+        "e2e_p95_s": 0.27350596152246
+      },
+      "return_request": {
+        "ttft_s": 0.0480459313839674,
+        "e2e_s": 0.048207610845565796,
+        "usage": {
+          "prompt_tokens": 3003,
+          "total_tokens": 3004,
+          "completion_tokens": 1
+        }
+      },
+      "metrics": {
+        "vllm:prefix_cache_queries_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 249681.0,
+        "vllm:prefix_cache_hits_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 176960.0,
+        "vllm:prompt_tokens_by_source_total{engine=\"0\",model_name=\"qwen2.5-3b\",source=\"local_compute\"}": 72721.0,
+        "vllm:prompt_tokens_by_source_total{engine=\"0\",model_name=\"qwen2.5-3b\",source=\"local_cache_hit\"}": 176987.0,
+        "vllm:prompt_tokens_cached_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 176960.0,
+        "vllm:prompt_tokens_recomputed_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 27.0
+      },
+      "scenario": "stale_history_pollution",
+      "seed": 242
+    },
+    {
+      "summary": {
+        "requests": 96,
+        "wall_s": 7.475594447925687,
+        "requests_per_s": 12.841788123837816,
+        "prompt_tokens_per_s": 13225.70408129005,
+        "ttft_mean_s": 0.6038757849019021,
+        "ttft_p50_s": 0.6135317403823137,
+        "ttft_p95_s": 0.6176870763301849,
+        "ttft_p99_s": 0.7386759910732508,
+        "e2e_p95_s": 0.6185063235461712
+      },
+      "metrics": {
+        "vllm:prefix_cache_queries_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 98870.0,
+        "vllm:prompt_tokens_by_source_total{engine=\"0\",model_name=\"qwen2.5-3b\",source=\"local_compute\"}": 98870.0
+      },
+      "scenario": "singleton_overhead",
+      "seed": 242
+    }
+  ]
+}

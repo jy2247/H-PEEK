@@ -1,0 +1,80 @@
+{
+  "config": {
+    "model": "qwen2.5-3b",
+    "prefix_tokens_requested": 3456,
+    "history_repeats": 4,
+    "pressure_count": 24
+  },
+  "history_requests": [
+    {
+      "ttft_s": 0.3570709116756916,
+      "e2e_s": 0.3572606611996889,
+      "usage": {
+        "prompt_tokens": 3463,
+        "total_tokens": 3464,
+        "completion_tokens": 1
+      }
+    },
+    {
+      "ttft_s": 0.04869181290268898,
+      "e2e_s": 0.04885860159993172,
+      "usage": {
+        "prompt_tokens": 3463,
+        "total_tokens": 3464,
+        "completion_tokens": 1
+      }
+    },
+    {
+      "ttft_s": 0.04954363964498043,
+      "e2e_s": 0.04970153048634529,
+      "usage": {
+        "prompt_tokens": 3463,
+        "total_tokens": 3464,
+        "completion_tokens": 1
+      }
+    },
+    {
+      "ttft_s": 0.04900268279016018,
+      "e2e_s": 0.049159491434693336,
+      "usage": {
+        "prompt_tokens": 3463,
+        "total_tokens": 3464,
+        "completion_tokens": 1
+      }
+    }
+  ],
+  "pressure_summary": {
+    "count": 24,
+    "ttft_mean_s": 0.31968613325928646,
+    "ttft_p95_s": 0.3232913129031658
+  },
+  "return_request": {
+    "ttft_s": 0.05180536396801472,
+    "e2e_s": 0.05198240280151367,
+    "usage": {
+      "prompt_tokens": 3465,
+      "total_tokens": 3466,
+      "completion_tokens": 1
+    }
+  },
+  "metric_deltas": {
+    "history_build": {
+      "vllm:prefix_cache_queries_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 13852.0,
+      "vllm:prefix_cache_hits_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 10368.0,
+      "vllm:prompt_tokens_by_source_total{engine=\"0\",model_name=\"qwen2.5-3b\",source=\"local_compute\"}": 3484.0,
+      "vllm:prompt_tokens_by_source_total{engine=\"0\",model_name=\"qwen2.5-3b\",source=\"local_cache_hit\"}": 10368.0,
+      "vllm:prompt_tokens_cached_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 10368.0
+    },
+    "pressure": {
+      "vllm:prefix_cache_queries_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 83126.0,
+      "vllm:prompt_tokens_by_source_total{engine=\"0\",model_name=\"qwen2.5-3b\",source=\"local_compute\"}": 83126.0
+    },
+    "return": {
+      "vllm:prefix_cache_queries_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 3465.0,
+      "vllm:prefix_cache_hits_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 3456.0,
+      "vllm:prompt_tokens_by_source_total{engine=\"0\",model_name=\"qwen2.5-3b\",source=\"local_compute\"}": 9.0,
+      "vllm:prompt_tokens_by_source_total{engine=\"0\",model_name=\"qwen2.5-3b\",source=\"local_cache_hit\"}": 3456.0,
+      "vllm:prompt_tokens_cached_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 3456.0
+    }
+  }
+}

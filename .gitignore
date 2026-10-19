@@ -1,0 +1,17 @@
+__pycache__/
+.pytest_cache/
+.venv/
+.cargo/
+.rustup/
+models/
+logs/
+dist/
+target/
+results/raw/
+results/baseline/*_profile_*.json
+results/baseline/vanilla_smoke.json
+*.log
+*.jsonl
+paper/*.aux
+paper/*.out
+paper/*.toc

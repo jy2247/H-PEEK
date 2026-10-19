@@ -1,0 +1,77 @@
+{
+  "config": {
+    "model": "qwen2.5-3b",
+    "prefix_tokens_requested": 3456,
+    "history_repeats": 4,
+    "pressure_count": 24
+  },
+  "history_requests": [
+    {
+      "ttft_s": 0.3523381520062685,
+      "e2e_s": 0.35258482955396175,
+      "usage": {
+        "prompt_tokens": 3463,
+        "total_tokens": 3464,
+        "completion_tokens": 1
+      }
+    },
+    {
+      "ttft_s": 0.05043675750494003,
+      "e2e_s": 0.050625648349523544,
+      "usage": {
+        "prompt_tokens": 3463,
+        "total_tokens": 3464,
+        "completion_tokens": 1
+      }
+    },
+    {
+      "ttft_s": 0.05688425712287426,
+      "e2e_s": 0.05702868476510048,
+      "usage": {
+        "prompt_tokens": 3463,
+        "total_tokens": 3464,
+        "completion_tokens": 1
+      }
+    },
+    {
+      "ttft_s": 0.052827488631010056,
+      "e2e_s": 0.05313912779092789,
+      "usage": {
+        "prompt_tokens": 3463,
+        "total_tokens": 3464,
+        "completion_tokens": 1
+      }
+    }
+  ],
+  "pressure_summary": {
+    "count": 24,
+    "ttft_mean_s": 0.31375736572469276,
+    "ttft_p95_s": 0.3182109482586384
+  },
+  "return_request": {
+    "ttft_s": 0.3140210509300232,
+    "e2e_s": 0.3142994809895754,
+    "usage": {
+      "prompt_tokens": 3465,
+      "total_tokens": 3466,
+      "completion_tokens": 1
+    }
+  },
+  "metric_deltas": {
+    "history_build": {
+      "vllm:prefix_cache_queries_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 13852.0,
+      "vllm:prefix_cache_hits_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 10368.0,
+      "vllm:prompt_tokens_by_source_total{engine=\"0\",model_name=\"qwen2.5-3b\",source=\"local_compute\"}": 3484.0,
+      "vllm:prompt_tokens_by_source_total{engine=\"0\",model_name=\"qwen2.5-3b\",source=\"local_cache_hit\"}": 10368.0,
+      "vllm:prompt_tokens_cached_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 10368.0
+    },
+    "pressure": {
+      "vllm:prefix_cache_queries_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 83126.0,
+      "vllm:prompt_tokens_by_source_total{engine=\"0\",model_name=\"qwen2.5-3b\",source=\"local_compute\"}": 83126.0
+    },
+    "return": {
+      "vllm:prefix_cache_queries_total{engine=\"0\",model_name=\"qwen2.5-3b\"}": 3465.0,
+      "vllm:prompt_tokens_by_source_total{engine=\"0\",model_name=\"qwen2.5-3b\",source=\"local_compute\"}": 3465.0
+    }
+  }
+}
